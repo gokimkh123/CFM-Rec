@@ -1,46 +1,41 @@
 model: FlowCF
-dataset: ml-1m
+
+# [수정 1] 실제 폴더 이름과 똑같이 맞춰야 합니다.
+dataset: BPR_cv  
+
 gpu_id: '0'
 log_wandb: False
-wandb_run_name: 'flowcf-high-perf'
 
-# [모델 파라미터 - 자원이 많으므로 모델을 키웁니다]
-n_steps: 10                          # 그대로 유지 (너무 높이면 학습 시간만 길어짐)
-s_steps: 10                          # 추론 속도를 위해 2 유지 (원하면 5~10으로 늘려 정밀도 향상 가능)
-dims_mlp: [1000, 1000, 1000]         # [변경] 레이어를 더 넓고 깊게 쌓음 (성능 향상 기대)
-time_embedding_size: 32              # [변경] 임베딩 사이즈 증가 (10 -> 32)
-dropout: 0.3
+# [수정 2] data_path는 'BPR_cv' 폴더가 들어있는 '부모 폴더'까지만 적습니다.
+# RecBole이 자동으로 /app/dataset/ML1M/ + BPR_cv/ 를 합쳐서 경로를 만듭니다.
+data_path: /app/dataset/ML1M/
 
-# [데이터셋 설정]
-USER_ID_FIELD: item_id
-ITEM_ID_FIELD: user_id
+# [나머지는 그대로 유지]
+benchmark_filename: ['train', 'vali', 'test']
+field_separator: "\t"
+USER_ID_FIELD: mid
+ITEM_ID_FIELD: uid
 RATING_FIELD: rating
+TIME_FIELD: null
 load_col:
-    inter: [user_id, item_id, rating, timestamp]
+    inter: [uid, mid, rating]
+user_inter_num_interval: "[0,inf)"
+item_inter_num_interval: "[0,inf)"
+alias_of_user_id: ~
+alias_of_item_id: ~
 
-user_inter_num_interval: "[5,inf)"
-item_inter_num_interval: "[5,inf)"
-val_interval: {rating: "[4, inf)"}
-
-# [학습 설정 - 자원 풀버전]
-epochs: 200                          # [변경] 배치사이즈가 커지면 업데이트 횟수가 줄어드니 에포크를 늘림
-train_batch_size: 1024               # [핵심 변경] 256 -> 4096 (GPU 메모리 최대 활용)
-learner: adam
-learning_rate: 0.001
+# 모델 파라미터 (기존 유지)
+n_steps: 20
+s_steps: 10
+dims_mlp: [2000, 2000, 2000, 2000]
+time_embedding_size: 64
+dropout: 0.2
+epochs: 300
+train_batch_size: 4096
+learning_rate: 0.0005
 eval_step: 1
-stopping_step: 20                    # [변경] 조기 종료 참을성 증가
+stopping_step: 30
 
-# [평가 설정]
-eval_args:
-    split: {'RS': [0.8, 0.1, 0.1]}
-    group_by: user
-    order: RO
-    mode: full
-metrics: ['Recall', 'MRR', 'NDCG', 'Hit', 'Precision']
-topk: [10]
-valid_metric: MRR@10
-valid_metric_bigger: True
-eval_batch_size: 40960               # [핵심 변경] 평가 시 한 번에 엄청난 양 처리
-
-# [시스템 설정]
-worker: 4                            # [핵심 변경] 데이터 로딩에 CPU 코어 4개 사용 (기본값 0은 느림)
+# [실험 옵션]
+prior_type: 'gaussian'  # 'gaussian' 또는 'bernoulli'
+act_func: 'gelu'        # 'gelu' 또는 'leakyrelu'

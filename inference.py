@@ -4,139 +4,72 @@ import numpy as np
 import os
 import sys
 
-# [중요] model 패키지 경로 인식
+# 경로 설정
 sys.path.append(os.getcwd())
 
 from recbole.config import Config
-from recbole.data import create_dataset
+from recbole.data import create_dataset, data_preparation
 from recbole.utils import init_seed
-from recbole.data.interaction import Interaction
-from model.flowcf import FlowCF  # FlowCF 클래스 직접 임포트
+from model.flowcf import FlowCF
 
-# --------------------------------------------------------------------------
-# 유저/아이템 정보 로드 함수 (ML-1M 데이터셋 기준)
-# --------------------------------------------------------------------------
-def load_maps(dataset_path):
-    # 아이템(영화) 정보 로드
-    item_file = os.path.join(dataset_path, 'ml-1m.item')
-    movie_id2title = {}
-    if os.path.exists(item_file):
-        with open(item_file, 'r', encoding='iso-8859-1') as f:
-            lines = f.readlines()
-            sep = '::' if '::' in lines[1] else '\t'
-            start = 0 if '::' in lines[1] else 1
-            for line in lines[start:]:
-                parts = line.strip().split(sep)
-                if len(parts) >= 2:
-                    movie_id2title[parts[0]] = parts[1]
+def inference_cold_item(model, dataset, target_mid, k=10):
+    """
+    특정 영화(Mid)에 대해 좋아할 유저들을 추론
+    """
+    print(f"\n[추론 시작] Target Movie ID: {target_mid}")
+
+    # 1. 모델이 학습한 Side Info 범위 내인지 확인
+    if target_mid >= model.side_emb.shape[0]:
+        print(f"Error: 입력한 Mid({target_mid})는 임베딩 파일 범위(0~{model.side_emb.shape[0]-1})를 벗어났습니다.")
+        return
+
+    # 2. Cold-Start 예측 실행
+    # (내부적으로 Side Info를 가져와서 Noise와 결합해 유저 벡터 생성)
+    with torch.no_grad():
+        scores = model.predict_cold_item(int(target_mid))
     
-    # 유저 정보 로드
-    user_file = os.path.join(dataset_path, 'ml-1m.user')
-    user_id2info = {}
-    if os.path.exists(user_file):
-        with open(user_file, 'r', encoding='iso-8859-1') as f:
-            lines = f.readlines()
-            sep = '::' if '::' in lines[1] else '\t'
-            start = 0 if '::' in lines[1] else 1
-            for line in lines[start:]:
-                parts = line.strip().split(sep)
-                if len(parts) >= 3:
-                    # 성별, 연령대 정보 포맷팅
-                    user_id2info[parts[0]] = f"Gender:{parts[1]}, Age:{parts[2]}"
-    return movie_id2title, user_id2info
+    # scores shape: (1, n_users) -> (n_users,)
+    scores = scores.view(-1)
 
-# ==========================================================================
-# 메인 실행 코드
-# ==========================================================================
+    # 3. 상위 K명 유저 추출
+    values, top_indices = torch.topk(scores, k)
+    top_indices = top_indices.cpu().numpy()
+
+    # 4. 결과 출력
+    print(f"\nTop-{k} 추천 유저 리스트:")
+    print("-" * 30)
+    for rank, idx in enumerate(top_indices):
+        # RecBole 내부 ID를 실제 User ID로 변환 (필요한 경우)
+        # flowcf.yaml에서 ITEM_ID_FIELD: uid 로 설정했으므로, 
+        # dataset.id2token(dataset.iid_field, idx)를 쓰면 실제 uid가 나옵니다.
+        real_uid = dataset.id2token(dataset.iid_field, idx)
+        score = values[rank].item()
+        print(f"Rank {rank+1}: User ID {real_uid} (Score: {score:.4f})")
+    print("-" * 30)
+
 if __name__ == '__main__':
-    # 1. 커맨드라인 인자 파싱 (파일명 입력받기)
     parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to the model checkpoint file')
-    # parse_known_args()를 써야 RecBole 내부 인자와 충돌하지 않음
-    args, _ = parser.parse_known_args()
+    parser.add_argument('--config', type=str, default='flowcf.yaml')
+    parser.add_argument('--checkpoint', type=str, required=True, help='학습된 모델 경로 (.pth)')
+    parser.add_argument('--mid', type=int, required=True, help='추론할 영화 ID (Mid)')
+    args = parser.parse_args()
 
-    # 2. 설정 로드
-    print(">>> [System] 설정을 로드합니다...")
-    config = Config(model=FlowCF, config_file_list=['flowcf.yaml'])
+    # 1. 설정 로드
+    config = Config(model=FlowCF, config_file_list=[args.config])
     init_seed(config['seed'], config['reproducibility'])
-
-    # 3. 데이터셋 구조 로드 (ID 매핑용)
+    
+    # 2. 데이터셋 정보 로드 (ID 매핑 정보를 위해 필요)
     dataset = create_dataset(config)
-
-    # 4. 모델 초기화
+    
+    # 3. 모델 초기화
+    # (데이터셋의 메타데이터만 필요하므로 전체 로딩 없이 dataset만 넘김)
     model = FlowCF(config, dataset).to(config['device'])
     
-    # 5. [핵심] 학습된 가중치(Checkpoint) 로드
-    checkpoint_path = args.checkpoint
-    print(f">>> [System] 모델 파일을 로드합니다: {checkpoint_path}")
-    
-    if os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location=config['device'])
-        model.load_state_dict(checkpoint['state_dict'])
-        print(">>> [System] 가중치 로드 성공! (학습된 모델로 추론합니다)")
-    else:
-        print(f">>> [Error] 파일이 존재하지 않습니다: {checkpoint_path}")
-        sys.exit(1)
-
+    # 4. 체크포인트 로드
+    print(f"Loading model from {args.checkpoint}...")
+    checkpoint = torch.load(args.checkpoint)
+    model.load_state_dict(checkpoint['state_dict'])
     model.eval()
 
-    # 6. 메타데이터(유저 정보) 로드
-    movie_title_map, user_info_map = load_maps(config['data_path'])
-
-    # --------------------------------------------------------------------------
-    # Item Cold Start 시뮬레이션
-    # --------------------------------------------------------------------------
-    print("\n" + "=" * 50)
-    print(" >>> Item Cold Start 시뮬레이션 시작")
-    print("=" * 50)
-
-    # 시드 유저 입력
-    seed_real_users = ['1', '10', '100', '55']
-    print(f"\n[입력 상황] 신규 영화 개봉! 얼리어답터 유저들: {seed_real_users}")
-
-    # 입력 벡터 생성 (Multi-hot)
-    total_users = dataset.item_num  # Swap 되었으므로 item_num이 유저 수
-    input_vector = torch.zeros((1, total_users)).to(config['device'])
-
-    seed_tokens = []
-    for real_uid in seed_real_users:
-        try:
-            # Swap 되었으므로 iid_field가 user_id
-            token = dataset.token2id(dataset.iid_field, real_uid)
-            input_vector[0, token] = 1.0
-            seed_tokens.append(token)
-        except ValueError:
-            pass
-
-    # 모델에 히스토리 주입 (Monkey Patching)
-    original_history = model.history_item_matrix if hasattr(model, 'history_item_matrix') else None
-    model.history_item_matrix = input_vector 
-
-    dummy_interaction = Interaction({
-        dataset.uid_field: torch.tensor([0]).to(config['device']), 
-    })
-
-    # 추론 실행
-    with torch.no_grad():
-        prediction_scores = model.full_sort_predict(dummy_interaction)
-    
-    # 히스토리 원상복구
-    if original_history is not None:
-        model.history_item_matrix = original_history
-
-    # 결과 분석 (상위 10명 추출)
-    scores = prediction_scores.view(-1)
-    scores[seed_tokens] = -np.inf  # 이미 본 사람은 제외
-    
-    top_k = 10
-    vals, indices = torch.topk(scores, top_k)
-    
-    print(f"\n[분석 결과] 이 영화를 좋아할 잠재 관객 Top {top_k}:")
-    indices = indices.cpu().numpy()
-    
-    for rank, idx in enumerate(indices):
-        real_user_id = dataset.id2token(dataset.iid_field, idx)
-        user_info = user_info_map.get(real_user_id, "Unknown Info")
-        print(f"  Rank {rank+1}: User {real_user_id} \t| {user_info}")
-    
-    print("\n[완료] 분석이 끝났습니다.")
+    # 5. 추론 실행
+    inference_cold_item(model, dataset, args.mid)

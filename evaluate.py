@@ -1,168 +1,170 @@
 import argparse
 import torch
+import torch.nn as nn
 import numpy as np
+import pandas as pd
 import os
 import sys
-import random
 
-# 경로 설정
+# 현재 경로 추가
 sys.path.append(os.getcwd())
 
 from recbole.config import Config
 from recbole.data import create_dataset
 from recbole.utils import init_seed
-from recbole.data.interaction import Interaction
 from model.flowcf import FlowCF
 
-# ============================================================================
-# [평가 지표 함수] Recall & NDCG 계산
-# ============================================================================
-def compute_metrics(top_indices, ground_truth_tokens, k=10):
-    """
-    top_indices: 모델이 추천한 유저 ID 리스트 (상위 K개)
-    ground_truth_tokens: 실제로 좋아한 유저 ID 리스트 (정답)
-    """
-    # 1. Hit (맞췄는가?)
+def compute_recall_ndcg(top_k_indices, ground_truth_internal_ids, k):
     hits = 0
     sum_r = 0.0
+    gt_set = set(ground_truth_internal_ids)
     
-    # Ground Truth를 set으로 변환 (검색 속도 향상)
-    gt_set = set(ground_truth_tokens)
-    
-    for i, idx in enumerate(top_indices):
+    for i, idx in enumerate(top_k_indices):
         if idx in gt_set:
             hits += 1
-            sum_r += 1.0 / np.log2(i + 2) # NDCG 분자
+            sum_r += 1.0 / np.log2(i + 2)
 
-    # 2. Recall@K
-    recall = hits / len(ground_truth_tokens) if len(ground_truth_tokens) > 0 else 0.0
-
-    # 3. NDCG@K
-    dcg = sum_r
-    idcg = sum([1.0 / np.log2(i + 2) for i in range(min(len(ground_truth_tokens), k))])
-    ndcg = dcg / idcg if idcg > 0 else 0.0
-
+    recall = hits / len(gt_set) if len(gt_set) > 0 else 0.0
+    idcg = sum([1.0 / np.log2(i + 2) for i in range(min(len(gt_set), k))])
+    ndcg = sum_r / idcg if idcg > 0 else 0.0
+    
     return recall, ndcg
 
-# ============================================================================
-# 메인 평가 로직
-# ============================================================================
-if __name__ == '__main__':
-    # 1. 설정 및 모델 로드
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--checkpoint', type=str, required=True, help='Path to .pth file')
-    parser.add_argument('--test_items', type=int, default=100, help='Number of items to test')
-    args, _ = parser.parse_known_args()
-
-    config = Config(model=FlowCF, config_file_list=['flowcf.yaml'])
-    init_seed(config['seed'], config['reproducibility'])
-    dataset = create_dataset(config)
-
-    model = FlowCF(config, dataset).to(config['device'])
-    
-    # 가중치 로드
-    if os.path.exists(args.checkpoint):
-        checkpoint = torch.load(args.checkpoint, map_location=config['device'])
-        model.load_state_dict(checkpoint['state_dict'])
-        print(f">>> [System] 모델 로드 완료: {args.checkpoint}")
+def get_model_settings(model):
+    """
+    모델이 기억하고 있는 설정값(prior_type, act_func)을 읽어옵니다.
+    """
+    # 1. 초기 분포 확인
+    if hasattr(model, 'prior_type'):
+        dist_name = model.prior_type.capitalize() # gaussian -> Gaussian
     else:
-        print(">>> [Error] 모델 파일이 없습니다.")
-        sys.exit(1)
-        
+        dist_name = "Gaussian" # 기본값
+
+    # 2. 활성화 함수 확인
+    if hasattr(model, 'act_func'):
+        act_name = model.act_func.upper() # gelu -> GELU
+        if act_name == 'LEAKYRELU':
+            act_name = 'LeakyReLU'
+    else:
+        # 혹시 속성이 없으면 모듈 뒤져서 찾기 (구형 호환성)
+        act_name = "Unknown"
+        for module in model.modules():
+            if isinstance(module, nn.GELU):
+                act_name = "GELU"
+                break
+            elif isinstance(module, nn.LeakyReLU):
+                act_name = "LeakyReLU"
+                break
+    
+    return dist_name, act_name
+
+def print_custom_table(results, count, dist_name, act_name, dataset_name="MovieLens-1M"):
+    r10 = results.get(10, {'recall': 0})['recall'] / count if count > 0 else 0
+    r20 = results.get(20, {'recall': 0})['recall'] / count if count > 0 else 0
+    n10 = results.get(10, {'ndcg': 0})['ndcg'] / count if count > 0 else 0
+    n20 = results.get(20, {'ndcg': 0})['ndcg'] / count if count > 0 else 0
+    
+    print("\n")
+    print(f"{' ':35}{dataset_name}")
+    
+    border = "+" + "-"*12 + "+" + "-"*12 + "+" + "-"*12 + "+" + "-"*24 + "+" + "-"*24 + "+"
+    print(border)
+    print(f"| {'Methods':^10} | {'Prior':^10} | {'Act.Func':^10} | {'Recall @10 / @20':^22} | {'NDCG @10 / @20':^22} |")
+    print("+" + "="*12 + "+" + "="*12 + "+" + "="*12 + "+" + "="*24 + "+" + "="*24 + "+")
+    
+    recall_str = f"{r10:.4f} / {r20:.4f}"
+    ndcg_str = f"{n10:.4f} / {n20:.4f}"
+    
+    print(f"| {'FlowCF':^10} | {dist_name:^10} | {act_name:^10} | {recall_str:^22} | {ndcg_str:^22} |")
+    print(border)
+    print("\n")
+
+def evaluate_cold_start(model, dataset, test_file_path, k_list=[10, 20]):
+    print(f"\n[평가 시작] Cold-Start Item 평가 (File: {test_file_path})")
+    
+    if not os.path.exists(test_file_path):
+        print(f"Error: 파일을 찾을 수 없습니다: {test_file_path}")
+        return
+
+    df = pd.read_csv(test_file_path, sep='\t')
+    df.columns = [col.split(':')[0] for col in df.columns]
+    
+    test_items = df.groupby('mid')['uid'].apply(list).to_dict()
+    print(f"총 테스트 아이템(Cold Items) 수: {len(test_items)}")
+    
+    results = {k: {'recall': 0.0, 'ndcg': 0.0} for k in k_list}
+    count = 0
+    
     model.eval()
-
-    # ----------------------------------------------------------------------
-    # [Cold Start 평가 시작]
-    # ----------------------------------------------------------------------
-    print(f"\n>>> [Evaluation] 무작위 영화 {args.test_items}개를 뽑아 Cold Start 성능을 테스트합니다...")
-    print("    (각 영화의 유저 중 80%를 힌트로 주고, 나머지 20%를 맞추는지 확인)")
     
-    # Swap 되었으므로: dataset.user_num = 실제 영화(Item) 개수
-    # dataset.item_num = 실제 유저(User) 개수
+    # 모델 설정 정보 가져오기
+    dist_name, act_name = get_model_settings(model)
     
-    # 전체 영화(가상의 유저 ID) 리스트
-    all_movie_indices = np.arange(dataset.user_num)
-    
-    # 랜덤하게 테스트할 영화 뽑기
-    np.random.shuffle(all_movie_indices)
-    test_movie_indices = all_movie_indices[:args.test_items]
+    movie_field = dataset.uid_field 
+    user_field = dataset.iid_field 
+    max_k = max(k_list)
 
-    total_recall = 0.0
-    total_ndcg = 0.0
-    valid_count = 0
+    with torch.no_grad():
+        for i, (mid_raw, uids_raw) in enumerate(test_items.items()):
+            try:
+                internal_mid = dataset.token2id(movie_field, str(mid_raw))
+            except (ValueError, KeyError):
+                continue
 
-    # Interaction Matrix (누가 뭘 봤는지 전체 데이터)
-    # inter_feat는 DataFrame 형태
-    df = dataset.inter_feat
-    
-    # 컬럼명 가져오기 (Swap된 상태 고려)
-    # uid_field -> 실제 영화 ID 컬럼 / iid_field -> 실제 유저 ID 컬럼
-    col_movie = dataset.uid_field 
-    col_user = dataset.iid_field
+            gt_internal_uids = []
+            for uid in uids_raw:
+                try:
+                    gt_internal_uids.append(dataset.token2id(user_field, str(uid)))
+                except:
+                    pass
+            
+            if not gt_internal_uids:
+                continue
 
-    for movie_idx in test_movie_indices:
-        # 1. 이 영화를 본 모든 유저(Token) 찾기
-        # DataFrame에서 해당 movie_idx를 가진 행을 찾음
-        mask = (df[col_movie] == movie_idx)
-        users_who_liked = df[mask][col_user].values
+            scores = model.predict_cold_item(int(internal_mid)) 
+            scores = scores.view(-1)
+            
+            _, top_indices = torch.topk(scores, max_k)
+            top_indices = top_indices.cpu().numpy()
+            
+            for k in k_list:
+                current_top = top_indices[:k]
+                rec, ndcg = compute_recall_ndcg(current_top, gt_internal_uids, k)
+                results[k]['recall'] += rec
+                results[k]['ndcg'] += ndcg
+            
+            count += 1
+            
+            if (i+1) % 100 == 0:
+                print(f"Processed {i+1}/{len(test_items)} items...")
 
-        # 데이터가 너무 적으면(예: 5명 미만) 테스트에서 제외
-        if len(users_who_liked) < 10:
-            continue
-
-        # 2. 80% 힌트(Seed) / 20% 정답(Truth) 분리
-        np.random.shuffle(users_who_liked)
-        split_point = int(len(users_who_liked) * 0.8)
-        
-        seed_users = users_who_liked[:split_point]
-        ground_truth_users = users_who_liked[split_point:]
-
-        if len(ground_truth_users) == 0:
-            continue
-
-        # 3. 모델 입력 만들기
-        input_vector = torch.zeros((1, dataset.item_num)).to(config['device'])
-        input_vector[0, seed_users] = 1.0 # 힌트 주입
-
-        # 4. 모델 추론
-        original_history = model.history_item_matrix if hasattr(model, 'history_item_matrix') else None
-        model.history_item_matrix = input_vector
-        
-        dummy_inter = Interaction({dataset.uid_field: torch.tensor([0]).to(config['device'])})
-        
-        with torch.no_grad():
-            scores = model.full_sort_predict(dummy_inter)
-        
-        if original_history is not None:
-            model.history_item_matrix = original_history
-
-        # 5. 점수 계산
-        scores = scores.view(-1)
-        scores[seed_users] = -np.inf # 힌트로 준 건 정답에서 제외
-        
-        top_k = 10
-        _, top_indices = torch.topk(scores, top_k)
-        top_indices = top_indices.cpu().numpy()
-
-        # 지표 계산
-        rec, ndcg = compute_metrics(top_indices, ground_truth_users, k=10)
-        
-        total_recall += rec
-        total_ndcg += ndcg
-        valid_count += 1
-        
-        if valid_count % 10 == 0:
-            print(f"    -> 진행률: {valid_count}/{args.test_items} 완료...")
-
-    # 최종 결과 출력
-    if valid_count > 0:
-        avg_recall = total_recall / valid_count
-        avg_ndcg = total_ndcg / valid_count
-        print("\n" + "="*50)
-        print(f" [최종 성적표] 테스트한 영화 수: {valid_count}개")
-        print(f" 🎯 Recall@10: {avg_recall:.4f}")
-        print(f" 🌟 NDCG@10  : {avg_ndcg:.4f}")
-        print("="*50)
-        print(" 해석: Recall@10이 0.1(10%) 이상이면 꽤 쓸만한 모델입니다.")
+    if count > 0:
+        print_custom_table(results, count, dist_name, act_name)
     else:
-        print("[Warning] 테스트할 수 있는 충분한 데이터가 있는 영화가 없습니다.")
+        print("평가된 아이템이 없습니다.")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    # config 인자는 이제 필수가 아니지만 호환성을 위해 남겨둠
+    parser.add_argument('--config', type=str, default='flowcf.yaml')
+    parser.add_argument('--test_file', type=str, default='dataset/ML1M/BPR_cv/BPR_cv.test.inter')
+    parser.add_argument('--checkpoint', type=str, required=True)
+    args = parser.parse_args()
+
+    # [핵심 수정] 1. 체크포인트를 먼저 로드합니다.
+    print(f"Loading checkpoint from {args.checkpoint}")
+    checkpoint = torch.load(args.checkpoint)
+    
+    # [핵심 수정] 2. 체크포인트 안에 저장된 '학습 당시의 Config'를 꺼냅니다.
+    # RecBole은 저장할 때 config 객체 전체를 저장합니다.
+    saved_config = checkpoint['config']
+    
+    # 3. 저장된 Config로 데이터셋과 모델을 초기화합니다.
+    # 이렇게 해야 모델이 학습할 때 썼던 prior_type, act_func를 기억합니다.
+    init_seed(saved_config['seed'], saved_config['reproducibility'])
+    dataset = create_dataset(saved_config)
+    
+    model = FlowCF(saved_config, dataset).to(saved_config['device'])
+    model.load_state_dict(checkpoint['state_dict'])
+
+    evaluate_cold_start(model, dataset, args.test_file, k_list=[10, 20])

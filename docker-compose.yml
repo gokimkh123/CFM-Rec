@@ -1,8 +1,12 @@
+# docker-compose.yml
+
 services:
   flowcf:
     build: .
     image: coldflowcf
     container_name: flowcf_container
+    
+    # GPU 사용 설정 (NVIDIA Container Toolkit 필요)
     deploy:
       resources:
         reservations:
@@ -10,8 +14,11 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    
+    # 로컬 폴더 <-> 컨테이너 폴더 연결
     volumes:
-      - ./dataset:/app/dataset
-      - ./saved:/app/saved
+      - ./dataset:/app/dataset  # 데이터셋 접근용
+      - ./saved:/app/saved      # 학습된 모델 저장용 (.pth 파일이 여기 생김)
+    
     tty: true
     stdin_open: true

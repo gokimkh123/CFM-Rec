@@ -1,199 +1,220 @@
-from recbole.model.init import xavier_normal_initialization
-from recbole.model.layers import MLPLayers
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from recbole.model.abstract_recommender import AutoEncoderMixin, GeneralRecommender
+from recbole.model.abstract_recommender import GeneralRecommender
 from recbole.utils.enum_type import InputType
 import math
-import typing
-
+import os
 
 class FlowModel(nn.Module):
-    def __init__(
-        self,
-        dims: typing.List,
-        time_emb_size: int,
-        time_type="cat",
-        act_func="tanh",
-        norm=False,
-        init_dropout=0
-    ):
-        # PyTorch의 nn.Module 클래스를 상속받아 초기화합니다.
+    def __init__(self, dims, time_emb_size, time_type="cat", act_func="gelu", norm=False):
         super(FlowModel, self).__init__()
-
-        # MLP의 각 레이어 차원 크기 목록을 저장합니다. (예: [아이템 수, 300, 300, 아이템 수]가 될 것입니다.)
         self.dims = dims
-
-        # 시간 임베딩을 입력과 합치는 방식입니다. 현재는 "cat" (Concatenation, 결합)만 구현되어 있습니다.
         self.time_type = time_type
-
-        # 시간 임베딩 벡터의 차원 크기를 저장합니다.
         self.time_emb_dim = time_emb_size
-
-        # 입력 벡터 x를 정규화(Normalization)할지 여부를 저장합니다.
         self.norm = norm
-
-        # 시간 임베딩을 한 번 더 처리할 선형 레이어(Fully Connected Layer)를 정의합니다.
         self.emb_layer = nn.Linear(self.time_emb_dim, self.time_emb_dim)
-
-        # 시간 임베딩 방식이 "결합(cat)"일 경우의 처리입니다.
-        if self.time_type == "cat":
-            # Concatenate timestep embedding with input
-            '''
-            MLP의 첫 번째 입력 차원에 시간 임베딩 차원을 더합니다. 
-            이는 입력 벡터 x와 시간 임베딩이 결합된(concatenate된) 후 MLP의 입력으로 들어가기 때문입니다.
-            '''
-            self.dims[0] += self.time_emb_dim
+        
+        # 활성화 함수 선택
+        if act_func.lower() == 'leakyrelu':
+            activation = nn.LeakyReLU(negative_slope=0.2)
         else:
-            raise ValueError(
-                "Unimplemented timestep embedding type %s" % self.time_type
-            )
+            activation = nn.GELU()
 
-        '''
-        RecBole에서 제공하는 MLP 레이어 정의 함수입니다. 
-        layers는 업데이트된 self.dims를 사용하여 입력 x + t와 출력(아이템 수) 크기를 갖는 MLP를 구성합니다.
-        '''
-        self.mlp_layers = MLPLayers(
-            layers=self.dims, dropout=0.1, activation=act_func, last_activation=False
-        )
-
-        # 입력에 적용할 초기 드롭아웃 레이어를 정의합니다.
-        self.init_dropout = nn.Dropout(init_dropout)
-
-        # 모델의 모든 가중치를 Xavier 초기화 방식으로 초기화하여 학습이 안정적으로 시작되도록 합니다.
-        self.apply(xavier_normal_initialization)
+        layers = []
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i+1]))
+            # 마지막 레이어 제외하고 활성화 함수 추가
+            if i < len(dims) - 2:
+                layers.append(activation)
+                layers.append(nn.Dropout(p=0.2)) 
+        
+        self.mlp = nn.Sequential(*layers)
 
     def forward(self, x, t):
-
-        # 외부 함수 timestep_embedding_pi를 호출하여 시간 t를 사인/코사인 기반의 임베딩 벡터로 변환합니다. 변환된 벡터는 x와 동일한 장치(CPU/GPU)에 배치됩니다.
         time_emb = timestep_embedding_pi(t, self.time_emb_dim).to(x.device)
+        time_emb = self.emb_layer(time_emb)
+        if self.time_type == "cat":
+            x = torch.cat([x, time_emb], dim=-1)
+        out = self.mlp(x)
+        return out
 
-        # 시간 임베딩을 정의된 선형 레이어 self.emb_layer를 통과시킵니다.
-        emb = self.emb_layer(time_emb)
-        if self.norm:
-            # 입력 사용자 벡터 x를 정규화(Normalization)합니다.
-            x = F.normalize(x)
-
-        # 입력 x에 초기 드롭아웃을 적용하여 과적합을 방지합니다.
-        x = self.init_dropout(x)
-
-        '''
-        사용자 벡터 x와 처리된 시간 임베딩 emb를 마지막 차원(dim=-1)을 기준으로 결합(Concatenate)합니다. 
-        이 벡터 h가 MLP의 실제 입력이 됩니다.
-        '''
-        h = torch.cat([x, emb], dim=-1)
-
-        '''
-        결합된 입력 h를 MLP 레이어에 통과시켜 최종 출력을 계산합니다. 
-        이 출력은 최종 상호작용 벡터에 대한 예측
-        '''
-        output = self.mlp_layers(h)
-        return output
-
-
-class FlowCF(GeneralRecommender, AutoEncoderMixin):
-    input_type = InputType.LISTWISE
+class FlowCF(GeneralRecommender):
+    input_type = InputType.POINTWISE
 
     def __init__(self, config, dataset):
         super(FlowCF, self).__init__(config, dataset)
-        super().build_histroy_items(dataset)
 
-       # 1. n_steps 가져오기
-        if config['n_steps'] is not None:
-            self.n_steps = config['n_steps']
-        elif hasattr(config, 'final_config_dict') and 'n_steps' in config.final_config_dict:
-            self.n_steps = config.final_config_dict['n_steps']
+        # 1. 설정 로드
+        if 'prior_type' in config:
+            self.prior_type = config['prior_type'].lower()
         else:
-            self.n_steps = 10  # YAML에도 없으면 기본값
+            self.prior_type = 'gaussian'
 
-        # 2. s_steps 가져오기
-        if config['s_steps'] is not None:
-            self.s_steps = config['s_steps']
-        elif hasattr(config, 'final_config_dict') and 's_steps' in config.final_config_dict:
-            self.s_steps = config.final_config_dict['s_steps']
+        if 'act_func' in config:
+            self.act_func = config['act_func'].lower()
         else:
-            self.s_steps = 10   # YAML에도 없으면 기본값
-        print(f">>> [FlowCF Config Check] YAML 설정값 로드 성공 -> n_steps: {self.n_steps}, s_steps: {self.s_steps}")
-        self.time_steps = torch.linspace(0, 1, self.n_steps + 1)
+            self.act_func = 'gelu'
+        
+        print(f"\n[Model Config] Prior: {self.prior_type.upper()} | Activation: {self.act_func.upper()}\n")
 
+        # 2. Side Info 로드 및 정렬
+        npy_path = os.path.join("dataset", "ML1M", "mv-tag-emb.npy")
+        if not os.path.exists(npy_path):
+            npy_path = "/app/dataset/ML1M/mv-tag-emb.npy"
+        
+        raw_emb = np.load(npy_path)
+        self.raw_side_emb = torch.FloatTensor(raw_emb).to(self.device)
+        self.side_dim = self.raw_side_emb.shape[1]
+
+        # Re-alignment
+        n_movies = self.n_users 
+        aligned_emb = torch.zeros((n_movies, self.side_dim)).to(self.device)
+        for internal_id in range(1, n_movies):
+            try:
+                raw_token = dataset.id2token(dataset.uid_field, internal_id)
+                raw_id = int(raw_token)
+                if 0 <= raw_id < self.raw_side_emb.shape[0]:
+                    aligned_emb[internal_id] = self.raw_side_emb[raw_id]
+            except:
+                pass
+        self.side_emb = aligned_emb
+
+        # [순서 수정됨] 3. History Matrix 생성 (이게 먼저 있어야 계산 가능)
+        inter_matrix = dataset.inter_matrix(form='csr').astype('float32')
+        self.history_matrix = torch.FloatTensor(inter_matrix.toarray()).to(self.device)
+
+        # 4. Bernoulli Prior를 위한 유저 활동성 계산 (History Matrix 생성 후 호출)
+        if self.prior_type == 'bernoulli':
+            self.user_activity = self._get_user_activity(dataset)
+
+        # 5. 모델 구축
+        self.target_dim = self.n_items 
+        self.input_dim = self.target_dim + self.side_dim
+        self.n_steps = config["n_steps"]
         self.time_emb_size = config["time_embedding_size"]
-        dims = [self.n_items] + config["dims_mlp"] + [self.n_items]
+        
+        self.dims_mlp = [self.input_dim + self.time_emb_size] + config["dims_mlp"] + [self.target_dim]
 
-        self.flow_model = FlowModel(
-            dims=dims,
+        self.net = FlowModel(
+            dims=self.dims_mlp,
             time_emb_size=self.time_emb_size,
-            init_dropout=0
-        )
+            time_type="cat",
+            act_func=self.act_func,
+            norm=False
+        ).to(self.device)
 
-        self.item_frequencies = self.get_item_frequencies()
-
-    def get_item_frequencies(self):
-        item_counts = torch.zeros(self.n_items, device=self.device)
-        for user_id in range(self.n_users):
-            user_item_ids = self.history_item_id[user_id]
-            item_counts[user_item_ids] += 1
-
-        item_frequencies = item_counts / self.n_users
-        return item_frequencies
-
-    def forward(self, x, t):
-        return self.flow_model(x, t)
+    def _get_user_activity(self, dataset):
+        """각 유저가 영화를 좋아할 평균 확률 (Prior) 계산"""
+        activity = self.history_matrix.mean(dim=0)
+        return torch.clamp(activity, 1e-6, 1.0 - 1e-6)
 
     def calculate_loss(self, interaction):
-        user = interaction[self.USER_ID]
-        x1 = self.get_rating_matrix(user)
+        movie_ids = interaction[self.USER_ID]
+        x_1 = self.history_matrix[movie_ids]
+        cond = self.side_emb[movie_ids]
+        batch_size = x_1.size(0)
 
-        # Randomly sample steps
-        steps = torch.randint(0, self.n_steps, (x1.size(0),), device=self.device)
-        t = self.time_steps.to(x1.device)[steps].unsqueeze(1)
+        t = torch.rand(batch_size).to(self.device)
+        t_expand = t.view(-1, 1)
 
-        # Sample x0 from behavior-guided prior
-        x0 = torch.bernoulli(self.item_frequencies.expand(
-            x1.size(0), -1)).to(x1.device)
-        random_mask = torch.rand_like(x1, dtype=torch.float32) <= t
-        # Interpolation between x0 and x1
-        xt = torch.where(random_mask, x1, x0)
+        if self.prior_type == 'bernoulli':
+            # Bernoulli Path
+            prior_probs = self.user_activity.expand(batch_size, -1)
+            x_0 = torch.bernoulli(prior_probs).to(self.device)
+            mask = torch.rand_like(x_1) <= t_expand
+            x_t = torch.where(mask, x_1, x_0)
+            target = x_1
+        else:
+            # Gaussian Path
+            x_0 = torch.randn_like(x_1).to(self.device)
+            x_t = (1 - t_expand) * x_0 + t_expand * x_1
+            target = x_1 - x_0
 
-        model_output = self.forward(xt, t.squeeze(-1))
-        loss = mean_flat((x1 - model_output) ** 2)
-        loss = loss.mean()
+        net_input = torch.cat([x_t, cond], dim=1)
+        pred = self.net(net_input, t)
 
+        loss = F.mse_loss(pred, target)
         return loss
 
     def full_sort_predict(self, interaction):
-        user = interaction[self.USER_ID]
-        X_bar = self.get_rating_matrix(user)
-        Xt = X_bar
+        movie_ids = interaction[self.USER_ID]
+        cond = self.side_emb[movie_ids]
+        batch_size = movie_ids.size(0)
 
-        for i_t in range(self.n_steps-self.s_steps, self.n_steps):
-            t = self.time_steps[i_t].repeat(Xt.shape[0], 1).to(X_bar.device)
-            X1_hat = self.forward(Xt, t.squeeze(-1))
-            if i_t == self.n_steps-1:
-                break
-            t_next = self.time_steps[i_t + 1].repeat(Xt.shape[0], 1).to(X_bar.device)
-            v = (X1_hat - Xt) / (1 - t)
-            Xt_pos_probs = Xt + v * (t_next - t)
-            Xt_neg_probs = 1 - Xt_pos_probs
-            Xt_probs = torch.stack([Xt_neg_probs, Xt_pos_probs], dim=-1)
-            # Sample from Xt_probs, considering the unique nature of collaborative filtering, we only allow 0 -> 1
-            Xt = Xt_probs.argmax(dim=-1)
-            # Preverve the observed interactions
-            Xt = torch.logical_or(X_bar.to(torch.bool), Xt.to(torch.bool))
-            Xt = Xt.float()
+        # Init Noise
+        if self.prior_type == 'bernoulli':
+            prior_probs = self.user_activity.expand(batch_size, -1)
+            x_t = torch.bernoulli(prior_probs).to(self.device)
+        else:
+            x_t = torch.randn(batch_size, self.target_dim).to(self.device)
 
-        return X1_hat
+        steps = self.n_steps
+        dt = 1.0 / steps
+
+        # ODE Solver
+        for i in range(steps):
+            t_scalar = i / steps
+            t_tensor = torch.full((batch_size,), t_scalar).to(self.device)
+            
+            net_input = torch.cat([x_t, cond], dim=1)
+            pred = self.net(net_input, t_tensor)
+            
+            if self.prior_type == 'bernoulli':
+                if t_scalar >= 1.0: break
+                v_t = (pred - x_t) / (1.0 - t_scalar + 1e-5)
+                x_t = x_t + v_t * dt
+            else:
+                x_t = x_t + pred * dt
+        
+        return x_t
 
     def predict(self, interaction):
         item = interaction[self.ITEM_ID]
         x_t = self.full_sort_predict(interaction)
-        scores = x_t[:, item]
+        scores = x_t.gather(1, item.unsqueeze(1)).squeeze(1)
         return scores
 
+    def predict_cold_item(self, item_id_or_emb, num_samples=10):
+        if isinstance(item_id_or_emb, int):
+            if item_id_or_emb < self.side_emb.shape[0]:
+                 cond = self.side_emb[item_id_or_emb].unsqueeze(0)
+            else:
+                 cond = torch.zeros(1, self.side_dim).to(self.device)
+        else:
+            cond = torch.FloatTensor(item_id_or_emb).to(self.device)
+            if cond.dim() == 1:
+                cond = cond.unsqueeze(0)
 
-def mean_flat(tensor):
-    return tensor.mean(dim=list(range(1, len(tensor.shape))))
+        cond_expanded = cond.repeat(num_samples, 1)
+        batch_size = num_samples
+        
+        if self.prior_type == 'bernoulli':
+            prior_probs = self.user_activity.expand(batch_size, -1)
+            x_t = torch.bernoulli(prior_probs).to(self.device)
+        else:
+            x_t = torch.randn(batch_size, self.target_dim).to(self.device)
 
+        steps = self.n_steps
+        dt = 1.0 / steps
+        
+        with torch.no_grad():
+            for i in range(steps):
+                t_scalar = i / steps
+                t_tensor = torch.full((batch_size,), t_scalar).to(self.device)
+                
+                net_input = torch.cat([x_t, cond_expanded], dim=1)
+                pred = self.net(net_input, t_tensor)
+                
+                if self.prior_type == 'bernoulli':
+                    if t_scalar >= 1.0: break
+                    v_t = (pred - x_t) / (1.0 - t_scalar + 1e-5)
+                    x_t = x_t + v_t * dt
+                else:
+                    x_t = x_t + pred * dt
+
+        return x_t.mean(dim=0, keepdim=True)
 
 def timestep_embedding_pi(timesteps, dim, max_period=10000):
     half = dim // 2
@@ -201,14 +222,9 @@ def timestep_embedding_pi(timesteps, dim, max_period=10000):
         -math.log(max_period)
         * torch.arange(start=0, end=half, dtype=torch.float32)
         / half
-    ).to(
-        timesteps.device
-    ) * 2 * math.pi  # shape (dim//2,)
-    args = timesteps[:, None].float() * freqs[None]  # (N, dim//2)
-    embedding = torch.cat(
-        [torch.cos(args), torch.sin(args)], dim=-1)  # (N, (dim//2)*2)
+    ).to(timesteps.device) * 2 * math.pi
+    args = timesteps[:, None].float() * freqs[None]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
     if dim % 2:
-        # zero pad in the last dimension to ensure shape (N, dim)
-        embedding = torch.cat(
-            [embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     return embedding
