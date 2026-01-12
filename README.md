@@ -4,7 +4,7 @@ This repository is an **unofficial modified version** of the paper *"Flow Matchi
 
 ### 📜 Original Source
 * **Paper:** [Flow Matching for Collaborative Filtering (arXiv)](https://arxiv.org/abs/2502.07303)
-* **Original Repository:** [Insert Link to Original GitHub Repo Here]
+* **Original Repository:** [[Insert Link to Original GitHub Repo Here](https://github.com/chengkai-liu/FlowCF)]
 
 ### 🛠 Key Modifications
 This project adapts the original FlowCF model specifically for **Item Cold-Start scenarios**.
