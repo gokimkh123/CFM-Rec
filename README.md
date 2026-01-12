@@ -41,7 +41,11 @@ Simulate a "New Movie Release" scenario using specific seed users.
 Test the model's accuracy on Item Cold-Start scenarios (Recall@K, NDCG@K).
 ```bash
 # Replace the filename with your actual saved model
-docker compose run --rm flowcf python evaluate.py --checkpoint saved/FlowCF-Jan-12-2026_09-39-32.pth
+docker compose run --rm flowcf python run.py --prior gaussian --act gelu
+
+docker compose run --rm flowcf python run.py --prior bernoulli --act leakyrelu
+
+docker compose run --rm flowcf python run.py --prior gaussian --act leakyrelu
 
 docker compose run --rm flowcf python inference.py --checkpoint saved/FlowCF-Jan-12-2026_09-39-32.pth --mid 100
 ```
