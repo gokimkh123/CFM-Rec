@@ -1,16 +1,14 @@
 model: FlowCF
 
-# [수정 1] 실제 폴더 이름과 똑같이 맞춰야 합니다.
-dataset: BPR_cv  
+# =========================================================
+# 1. 데이터셋 설정
+# =========================================================
+dataset: BPR_cv
+data_path: /app/dataset/ML1M/
 
 gpu_id: '0'
 log_wandb: False
 
-# [수정 2] data_path는 'BPR_cv' 폴더가 들어있는 '부모 폴더'까지만 적습니다.
-# RecBole이 자동으로 /app/dataset/ML1M/ + BPR_cv/ 를 합쳐서 경로를 만듭니다.
-data_path: /app/dataset/ML1M/
-
-# [나머지는 그대로 유지]
 benchmark_filename: ['train', 'vali', 'test']
 field_separator: "\t"
 USER_ID_FIELD: mid
@@ -24,18 +22,45 @@ item_inter_num_interval: "[0,inf)"
 alias_of_user_id: ~
 alias_of_item_id: ~
 
-# 모델 파라미터 (기존 유지)
-n_steps: 20
-s_steps: 10
-dims_mlp: [2000, 2000, 2000, 2000]
-time_embedding_size: 64
-dropout: 0.2
-epochs: 300
-train_batch_size: 4096
-learning_rate: 0.0005
-eval_step: 1
-stopping_step: 30
+# =========================================================
+# 2. 모델 아키텍처 (논문 Appendix D 기준)
+# =========================================================
+# [핵심 변경 1] 논문은 ML-1M에서 [300, 300] 크기를 사용했습니다.
+# 기존 [2000, 2000, 2000, 2000]은 너무 과합니다.
+dims_mlp: [300, 300]
 
-# [실험 옵션]
-prior_type: 'bernoulli'  # 'gaussian' 또는 'bernoulli'
-act_func: 'leakyrelu'        # 'gelu' 또는 'leakyrelu'
+time_embedding_size: 64
+
+# [핵심 변경 2] 논문 명시: "The initial dropout rate of the MLP in FlowCF is fixed at 0"
+# Flow Matching은 경로를 학습하므로 Dropout이 방해가 될 수 있어 0을 씁니다.
+dropout: 0.0
+
+# =========================================================
+# 3. 학습 하이퍼파라미터 (논문 기준)
+# =========================================================
+epochs: 300
+train_batch_size: 4096    # 논문과 동일
+eval_batch_size: 4096   # [최적화] A6000 성능 활용 (논문 결과엔 영향 없음, 속도만 빨라짐)
+
+# [핵심 변경 3] 논문은 0.001 사용
+learning_rate: 0.001
+
+eval_step: 10             # 잦은 평가는 시간 낭비이므로 10 정도 추천
+stopping_step: 30
+worker: 16                # CPU 병목 방지
+
+# [핵심 변경 4] 논문 명시: "no weight decay"
+weight_decay: 0.0
+
+# =========================================================
+# 4. Flow Matching 알고리즘 설정
+# =========================================================
+n_steps: 100       # Flow Matching은 20번이면 충분 (속도 빠름)
+s_steps: 10       # Solver step (ODE 풀이 정밀도)
+
+# FlowCF의 핵심인 베르누이(이산형) 분포 사용
+prior_type: 'bernoulli'
+
+# 논문 구현체들은 보통 GELU를 기본으로 사용합니다.
+# (LeakyReLU를 쓰셔도 되지만, 논문 재현이 목표라면 GELU 추천)
+act_func: 'leakyrelu'

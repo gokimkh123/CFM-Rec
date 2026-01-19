@@ -32,7 +32,7 @@ alias_of_item_id: ~
 # 2. 모델 아키텍처 (공정한 비교를 위해 크기 통일)
 # =========================================================
 # MLP 레이어 크기: FlowCF와 똑같이 맞춤
-dims_mlp: [2000, 2000, 2000, 2000]
+dims_mlp: [300, 300]
 time_embedding_size: 64
 dropout: 0.2
 
@@ -41,11 +41,12 @@ dropout: 0.2
 # =========================================================
 epochs: 300
 train_batch_size: 4096
-eval_batch_size: 65536    # 특히 평가(추론) 때는 이게 커야 속도가 빨라집니다.
-learning_rate: 0.0005
-eval_step: 1
+eval_batch_size: 4096    # 특히 평가(추론) 때는 이게 커야 속도가 빨라집니다.
+learning_rate: 0.001
+eval_step: 10 
 stopping_step: 30
-worker: 8
+worker: 16
+weight_decay: 0.0        # 가중치 규제 끔
 # =========================================================
 # 4. Diffusion 알고리즘 특화 설정 (Gaussian)
 # =========================================================
@@ -60,7 +61,7 @@ beta_end: 0.02
 
 # [활성화 함수] 기본값은 'gelu'로 두되, 실행 시 변경 가능하게 설정
 # 옵션: 'gelu' 또는 'leakyrelu'
-act_func: 'gelu'
+act_func: 'leakyrelu'
 
 # [참고] Diffusion 모델은 태생적으로 Gaussian 분포를 사용하므로
 # FlowCF에 있던 prior_type: 'bernoulli' 옵션은 제거되었습니다.
