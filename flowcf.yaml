@@ -37,5 +37,5 @@ eval_step: 1
 stopping_step: 30
 
 # [실험 옵션]
-prior_type: 'gaussian'  # 'gaussian' 또는 'bernoulli'
-act_func: 'gelu'        # 'gelu' 또는 'leakyrelu'
+prior_type: 'bernoulli'  # 'gaussian' 또는 'bernoulli'
+act_func: 'leakyrelu'        # 'gelu' 또는 'leakyrelu'

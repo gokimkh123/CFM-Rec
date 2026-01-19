@@ -1,0 +1,66 @@
+model: DiffCF  # [핵심] FlowCF -> DiffCF로 변경
+
+# =========================================================
+# 1. 데이터셋 설정 (FlowCF와 100% 동일)
+# =========================================================
+dataset: BPR_cv
+# 실제 데이터 경로 (docker-compose에서 마운트된 경로)
+data_path: /app/dataset/ML1M/
+
+gpu_id: '0'
+log_wandb: False
+
+# Pre-split 데이터 사용 설정
+benchmark_filename: ['train', 'vali', 'test']
+field_separator: "\t"
+USER_ID_FIELD: mid
+ITEM_ID_FIELD: uid
+RATING_FIELD: rating
+TIME_FIELD: null
+
+# 데이터 로드 컬럼 설정
+load_col:
+    inter: [uid, mid, rating]
+
+# 인터랙션 범위 설정
+user_inter_num_interval: "[0,inf)"
+item_inter_num_interval: "[0,inf)"
+alias_of_user_id: ~
+alias_of_item_id: ~
+
+# =========================================================
+# 2. 모델 아키텍처 (공정한 비교를 위해 크기 통일)
+# =========================================================
+# MLP 레이어 크기: FlowCF와 똑같이 맞춤
+dims_mlp: [2000, 2000, 2000, 2000]
+time_embedding_size: 64
+dropout: 0.2
+
+# =========================================================
+# 3. 학습 하이퍼파라미터 (FlowCF와 100% 동일)
+# =========================================================
+epochs: 300
+train_batch_size: 4096
+eval_batch_size: 65536    # 특히 평가(추론) 때는 이게 커야 속도가 빨라집니다.
+learning_rate: 0.0005
+eval_step: 1
+stopping_step: 30
+worker: 8
+# =========================================================
+# 4. Diffusion 알고리즘 특화 설정 (Gaussian)
+# =========================================================
+# [Step 수] Flow Matching은 20으로 충분하지만, 
+# Diffusion은 노이즈 제거 특성상 보통 100~1000이 필요합니다.
+# 비교를 위한 최소 기준인 100으로 설정합니다.
+n_steps: 100
+
+# [Noise Schedule] Gaussian Diffusion의 핵심 파라미터 (Linear Schedule)
+beta_start: 0.0001
+beta_end: 0.02
+
+# [활성화 함수] 기본값은 'gelu'로 두되, 실행 시 변경 가능하게 설정
+# 옵션: 'gelu' 또는 'leakyrelu'
+act_func: 'gelu'
+
+# [참고] Diffusion 모델은 태생적으로 Gaussian 분포를 사용하므로
+# FlowCF에 있던 prior_type: 'bernoulli' 옵션은 제거되었습니다.

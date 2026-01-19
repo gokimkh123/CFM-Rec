@@ -12,7 +12,13 @@ sys.path.append(os.getcwd())
 from recbole.config import Config
 from recbole.data import create_dataset
 from recbole.utils import init_seed
+
+# [핵심] 두 모델 클래스를 모두 가져옵니다.
 from model.flowcf import FlowCF
+try:
+    from model.diffcf import DiffCF
+except ImportError:
+    DiffCF = None  # DiffCF 파일이 없을 경우를 대비
 
 def compute_recall_ndcg(top_k_indices, ground_truth_internal_ids, k):
     hits = 0
@@ -31,34 +37,22 @@ def compute_recall_ndcg(top_k_indices, ground_truth_internal_ids, k):
     return recall, ndcg
 
 def get_model_settings(model):
-    """
-    모델이 기억하고 있는 설정값(prior_type, act_func)을 읽어옵니다.
-    """
-    # 1. 초기 분포 확인
+    # 모델 설정값 읽기
     if hasattr(model, 'prior_type'):
-        dist_name = model.prior_type.capitalize() # gaussian -> Gaussian
+        dist_name = model.prior_type.capitalize() 
     else:
-        dist_name = "Gaussian" # 기본값
+        dist_name = "Gaussian" 
 
-    # 2. 활성화 함수 확인
     if hasattr(model, 'act_func'):
-        act_name = model.act_func.upper() # gelu -> GELU
+        act_name = model.act_func.upper() 
         if act_name == 'LEAKYRELU':
             act_name = 'LeakyReLU'
     else:
-        # 혹시 속성이 없으면 모듈 뒤져서 찾기 (구형 호환성)
-        act_name = "Unknown"
-        for module in model.modules():
-            if isinstance(module, nn.GELU):
-                act_name = "GELU"
-                break
-            elif isinstance(module, nn.LeakyReLU):
-                act_name = "LeakyReLU"
-                break
+        act_name = "GELU"
     
     return dist_name, act_name
 
-def print_custom_table(results, count, dist_name, act_name, dataset_name="MovieLens-1M"):
+def print_custom_table(results, count, model_name, dist_name, act_name, dataset_name="MovieLens-1M"):
     r10 = results.get(10, {'recall': 0})['recall'] / count if count > 0 else 0
     r20 = results.get(20, {'recall': 0})['recall'] / count if count > 0 else 0
     n10 = results.get(10, {'ndcg': 0})['ndcg'] / count if count > 0 else 0
@@ -75,7 +69,7 @@ def print_custom_table(results, count, dist_name, act_name, dataset_name="MovieL
     recall_str = f"{r10:.4f} / {r20:.4f}"
     ndcg_str = f"{n10:.4f} / {n20:.4f}"
     
-    print(f"| {'FlowCF':^10} | {dist_name:^10} | {act_name:^10} | {recall_str:^22} | {ndcg_str:^22} |")
+    print(f"| {model_name:^10} | {dist_name:^10} | {act_name:^10} | {recall_str:^22} | {ndcg_str:^22} |")
     print(border)
     print("\n")
 
@@ -96,13 +90,16 @@ def evaluate_cold_start(model, dataset, test_file_path, k_list=[10, 20]):
     count = 0
     
     model.eval()
-    
-    # 모델 설정 정보 가져오기
     dist_name, act_name = get_model_settings(model)
+    model_name = model.__class__.__name__ # 현재 사용 중인 클래스 이름 (DiffCF or FlowCF)
     
     movie_field = dataset.uid_field 
     user_field = dataset.iid_field 
     max_k = max(k_list)
+
+    # [앙상블] 성능 향상을 위해 여러 번 추론 후 평균 (DiffCF일 때 효과적)
+    # 속도가 중요하다면 1로 설정, 성능이 중요하다면 5 추천
+    n_repeat = 5 if model_name == 'DiffCF' else 1
 
     with torch.no_grad():
         for i, (mid_raw, uids_raw) in enumerate(test_items.items()):
@@ -121,10 +118,19 @@ def evaluate_cold_start(model, dataset, test_file_path, k_list=[10, 20]):
             if not gt_internal_uids:
                 continue
 
-            scores = model.predict_cold_item(int(internal_mid)) 
-            scores = scores.view(-1)
+            # 앙상블 적용
+            final_scores = None
+            for _ in range(n_repeat):
+                scores = model.predict_cold_item(int(internal_mid)) 
+                if final_scores is None:
+                    final_scores = scores
+                else:
+                    final_scores += scores
             
-            _, top_indices = torch.topk(scores, max_k)
+            final_scores = final_scores / n_repeat
+            final_scores = final_scores.view(-1)
+            
+            _, top_indices = torch.topk(final_scores, max_k)
             top_indices = top_indices.cpu().numpy()
             
             for k in k_list:
@@ -139,32 +145,46 @@ def evaluate_cold_start(model, dataset, test_file_path, k_list=[10, 20]):
                 print(f"Processed {i+1}/{len(test_items)} items...")
 
     if count > 0:
-        print_custom_table(results, count, dist_name, act_name)
+        print_custom_table(results, count, model_name, dist_name, act_name)
     else:
         print("평가된 아이템이 없습니다.")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    # config 인자는 이제 필수가 아니지만 호환성을 위해 남겨둠
     parser.add_argument('--config', type=str, default='flowcf.yaml')
     parser.add_argument('--test_file', type=str, default='dataset/ML1M/BPR_cv/BPR_cv.test.inter')
     parser.add_argument('--checkpoint', type=str, required=True)
     args = parser.parse_args()
 
-    # [핵심 수정] 1. 체크포인트를 먼저 로드합니다.
     print(f"Loading checkpoint from {args.checkpoint}")
     checkpoint = torch.load(args.checkpoint)
     
-    # [핵심 수정] 2. 체크포인트 안에 저장된 '학습 당시의 Config'를 꺼냅니다.
-    # RecBole은 저장할 때 config 객체 전체를 저장합니다.
+    # 저장된 Config 로드
     saved_config = checkpoint['config']
     
-    # 3. 저장된 Config로 데이터셋과 모델을 초기화합니다.
-    # 이렇게 해야 모델이 학습할 때 썼던 prior_type, act_func를 기억합니다.
+    # [수정] .get() 제거 및 안전한 접근 (배치 사이즈 자동 조절)
+    if 'eval_batch_size' in saved_config and saved_config['eval_batch_size'] < 32768:
+        print(f"Warning: 저장된 eval_batch_size({saved_config['eval_batch_size']})가 작습니다. 65536으로 임시 변경합니다.")
+        saved_config['eval_batch_size'] = 65536
+
     init_seed(saved_config['seed'], saved_config['reproducibility'])
     dataset = create_dataset(saved_config)
     
-    model = FlowCF(saved_config, dataset).to(saved_config['device'])
+    # [핵심 수정] .get() 제거: Config 객체는 딕셔너리가 아니므로 직접 접근 또는 try-except 사용
+    try:
+        model_name = saved_config['model']
+    except KeyError:
+        model_name = 'FlowCF' # 예전 버전 호환성
+    
+    print(f"Detected Model Type: {model_name}")
+
+    if model_name == 'DiffCF':
+        if DiffCF is None:
+            raise ImportError("model/diffcf.py 파일을 찾을 수 없습니다.")
+        model = DiffCF(saved_config, dataset).to(saved_config['device'])
+    else:
+        model = FlowCF(saved_config, dataset).to(saved_config['device'])
+
     model.load_state_dict(checkpoint['state_dict'])
 
     evaluate_cold_start(model, dataset, args.test_file, k_list=[10, 20])
