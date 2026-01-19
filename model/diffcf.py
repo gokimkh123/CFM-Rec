@@ -49,34 +49,66 @@ def timestep_embedding_pi(timesteps, dim, max_period=10000):
     if dim % 2:
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     return embedding
-
 class DiffCF(GeneralRecommender):
     input_type = InputType.POINTWISE
 
     def __init__(self, config, dataset):
         super(DiffCF, self).__init__(config, dataset)
 
-        # 1. 설정 로드
+        # =========================================================
+        # 1. 설정값 로드 (이 부분이 빠져서 에러가 났습니다)
+        # =========================================================
         self.n_steps = config["n_steps"]
         
-        # [수정됨] Config 객체는 .get()을 지원하지 않으므로 in 연산자 사용
+        # config에서 값을 읽어오되, 없으면 기본값(0.0001, 0.02) 사용
+        if 'beta_start' in config:
+            self.beta_start = config['beta_start']
+        else:
+            self.beta_start = 0.0001
+
+        if 'beta_end' in config:
+            self.beta_end = config['beta_end']
+        else:
+            self.beta_end = 0.02
+
         if 'act_func' in config:
             self.act_func = config['act_func']
         else:
             self.act_func = 'gelu'
 
-        # Diffusion Beta Schedule (Linear Schedule)
-        # config에 없을 경우를 대비해 안전하게 로드
-        self.beta_start = config['beta_start'] if 'beta_start' in config else 0.0001
-        self.beta_end = config['beta_end'] if 'beta_end' in config else 0.02
-        
+        # =========================================================
+        # 2. Beta Schedule 설정 (가우시안 확산 스케줄)
+        # =========================================================
         self.betas = torch.linspace(self.beta_start, self.beta_end, self.n_steps).to(self.device)
         self.alphas = 1.0 - self.betas
         self.alphas_cumprod = torch.cumprod(self.alphas, axis=0)
+        
+        # [x_0 예측을 위한 Posterior 계산용 계수들]
+        # alphas_cumprod_prev: [1.0, alpha_1, alpha_2, ...] (한 칸씩 밀기)
+        self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
+        
         self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
+        
+        # Posterior Mean 계산 계수
+        self.posterior_mean_coef1 = (
+            self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        )
+        self.posterior_mean_coef2 = (
+            (1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
+        )
+        
+        # Posterior Variance (log로 저장하여 안정성 확보)
+        posterior_variance = (
+            self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        )
+        self.posterior_log_variance_clipped = torch.log(
+            torch.clamp(posterior_variance, min=1e-20)
+        )
 
-        # 2. Side Info 로드 (FlowCF와 동일)
+        # =========================================================
+        # 3. Side Info 로드 (FlowCF와 동일)
+        # =========================================================
         npy_path = os.path.join("dataset", "ML1M", "mv-tag-emb.npy")
         if not os.path.exists(npy_path):
             npy_path = "/app/dataset/ML1M/mv-tag-emb.npy"
@@ -100,7 +132,9 @@ class DiffCF(GeneralRecommender):
         inter_matrix = dataset.inter_matrix(form='csr').astype('float32')
         self.history_matrix = torch.FloatTensor(inter_matrix.toarray()).to(self.device)
         
-        # 3. 모델 네트워크 구축
+        # =========================================================
+        # 4. 모델 네트워크 구축
+        # =========================================================
         self.target_dim = self.n_items 
         self.input_dim = self.target_dim + self.side_dim 
         self.time_emb_size = config["time_embedding_size"]
@@ -112,101 +146,66 @@ class DiffCF(GeneralRecommender):
             time_emb_size=self.time_emb_size,
             act_func=self.act_func
         ).to(self.device)
-
+        
+    # [수정 2] Loss 계산: 정답(Target)을 노이즈가 아닌 '원본(x_0)'으로 변경
     def calculate_loss(self, interaction):
         movie_ids = interaction[self.USER_ID]
-        x_0 = self.history_matrix[movie_ids] 
+        x_0 = self.history_matrix[movie_ids]  # 원본 데이터
         cond = self.side_emb[movie_ids]     
         batch_size = x_0.size(0)
 
         t = torch.randint(0, self.n_steps, (batch_size,), device=self.device).long()
         noise = torch.randn_like(x_0).to(self.device)
 
-        sqrt_alpha = self.sqrt_alphas_cumprod[t].view(-1, 1)
-        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1)
+        # Forward Process (x_0 -> x_t)
+        # x_t = sqrt(alpha_bar) * x_0 + sqrt(1-alpha_bar) * noise
+        sqrt_alpha_cumprod = torch.sqrt(self.alphas_cumprod[t]).view(-1, 1)
+        sqrt_one_minus_alpha_cumprod = torch.sqrt(1.0 - self.alphas_cumprod[t]).view(-1, 1)
         
-        x_t = sqrt_alpha * x_0 + sqrt_one_minus_alpha * noise
+        x_t = sqrt_alpha_cumprod * x_0 + sqrt_one_minus_alpha_cumprod * noise
 
+        # 모델 예측
         net_input = torch.cat([x_t, cond], dim=1)
-        predicted_noise = self.net(net_input, t)
+        predicted_x0 = self.net(net_input, t) # 모델이 x_0를 직접 예측하도록 함
 
-        loss = F.mse_loss(predicted_noise, noise)
+        # Loss: 예측한 x_0와 실제 x_0 비교
+        loss = F.mse_loss(predicted_x0, x_0)
         return loss
 
-    def predict(self, interaction):
-        item = interaction[self.ITEM_ID]
-        x_0_pred = self.p_sample_loop(interaction)
-        scores = x_0_pred.gather(1, item.unsqueeze(1)).squeeze(1)
-        return scores
-
+    # [수정 3] 추론 과정: 예측된 x_0를 이용해 x_{t-1} 계산 (DiffRec 논문 Eq.10 방식)
     @torch.no_grad()
     def p_sample_loop(self, interaction):
         movie_ids = interaction[self.USER_ID]
         cond = self.side_emb[movie_ids]
         batch_size = movie_ids.size(0)
 
+        # 랜덤 노이즈에서 시작
         x_t = torch.randn(batch_size, self.target_dim).to(self.device)
 
         for t in reversed(range(self.n_steps)):
             t_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
             
+            # 1. 모델이 x_0를 예측 ("이 노이즈 낀 데이터의 원본은 이거야!")
             net_input = torch.cat([x_t, cond], dim=1)
-            predicted_noise = self.net(net_input, t_tensor)
+            predicted_x0 = self.net(net_input, t_tensor)
+            
+            # (옵션) 예측값 클리핑: 데이터가 0~1 사이라면 클리핑하면 성능이 좋아질 수 있음
+            # predicted_x0 = torch.clamp(predicted_x0, -1.0, 1.0) 
 
-            beta_t = self.betas[t]
-            alpha_t = self.alphas[t]
-            alpha_bar_t = self.alphas_cumprod[t]
-            
-            coef1 = 1 / torch.sqrt(alpha_t)
-            coef2 = (1 - alpha_t) / torch.sqrt(1 - alpha_bar_t)
-            
-            mean = coef1 * (x_t - coef2 * predicted_noise)
-            
+            # 2. Posterior Mean 계산 (논문 Eq.7, Eq.10)
+            # mu_t = coef1 * pred_x0 + coef2 * x_t
+            posterior_mean = (
+                self.posterior_mean_coef1[t] * predicted_x0 +
+                self.posterior_mean_coef2[t] * x_t
+            )
+
+            # 3. 다음 단계 샘플링 (x_{t-1})
             if t > 0:
                 noise = torch.randn_like(x_t)
-                sigma_t = torch.sqrt(beta_t)
-                x_t = mean + sigma_t * noise
+                # sigma_t = sqrt(posterior_variance)
+                posterior_log_variance = self.posterior_log_variance_clipped[t]
+                x_t = posterior_mean + torch.exp(0.5 * posterior_log_variance) * noise
             else:
-                x_t = mean 
+                x_t = posterior_mean # 마지막 단계는 노이즈 없이 평균값 사용
 
         return x_t
-
-    def predict_cold_item(self, item_id_or_emb, num_samples=10):
-        if isinstance(item_id_or_emb, int):
-            if item_id_or_emb < self.side_emb.shape[0]:
-                 cond = self.side_emb[item_id_or_emb].unsqueeze(0)
-            else:
-                 cond = torch.zeros(1, self.side_dim).to(self.device)
-        else:
-            cond = torch.FloatTensor(item_id_or_emb).to(self.device)
-            if cond.dim() == 1:
-                cond = cond.unsqueeze(0)
-
-        cond_expanded = cond.repeat(num_samples, 1)
-        batch_size = num_samples
-        
-        x_t = torch.randn(batch_size, self.target_dim).to(self.device)
-
-        with torch.no_grad():
-            for t in reversed(range(self.n_steps)):
-                t_tensor = torch.full((batch_size,), t, device=self.device, dtype=torch.long)
-                net_input = torch.cat([x_t, cond_expanded], dim=1)
-                predicted_noise = self.net(net_input, t_tensor)
-
-                beta_t = self.betas[t]
-                alpha_t = self.alphas[t]
-                alpha_bar_t = self.alphas_cumprod[t]
-                
-                coef1 = 1 / torch.sqrt(alpha_t)
-                coef2 = (1 - alpha_t) / torch.sqrt(1 - alpha_bar_t)
-                
-                mean = coef1 * (x_t - coef2 * predicted_noise)
-                
-                if t > 0:
-                    noise = torch.randn_like(x_t)
-                    sigma_t = torch.sqrt(beta_t)
-                    x_t = mean + sigma_t * noise
-                else:
-                    x_t = mean
-
-        return x_t.mean(dim=0, keepdim=True)
