@@ -31,7 +31,7 @@ docker compose build
 This will start training using the optimized configuration in flowcf.yaml.
 
 ```bash
-docker compose up
+docker compose run --rm flowcf python run.py --config flowcf.yaml --act leakyrelu
 ```
 The trained model checkpoint will be saved in the saved/ directory (e.g., saved/FlowCF-Jan-12-xxxx.pth).
 
@@ -41,8 +41,7 @@ Simulate a "New Movie Release" scenario using specific seed users.
 Test the model's accuracy on Item Cold-Start scenarios (Recall@K, NDCG@K).
 ```bash
 # Replace the filename with your actual saved model
-docker compose run --rm flowcf python run.py --prior bernoulli --act leakyrelu
-
+docker compose run --rm flowcf python evaluate.py   --config flowcf.yaml   --checkpoint saved/FlowCF-Jan-19-2026_12-07-08.pth
 docker compose run --rm flowcf python inference.py --checkpoint saved/FlowCF-Jan-12-2026_09-39-32.pth --mid 100
 ```
 
