@@ -8,7 +8,7 @@ import math
 import os
 
 class FlowModel(nn.Module):
-    def __init__(self, dims, time_emb_size, time_type="cat", act_func="gelu", norm=False):
+    def __init__(self, dims, time_emb_size, time_type="cat", dropout_prob=0.0, act_func="gelu", norm=False):
         super(FlowModel, self).__init__()
         self.dims = dims
         self.time_type = time_type
@@ -25,10 +25,9 @@ class FlowModel(nn.Module):
         layers = []
         for i in range(len(dims) - 1):
             layers.append(nn.Linear(dims[i], dims[i+1]))
-            # 마지막 레이어 제외하고 활성화 함수 추가
             if i < len(dims) - 2:
                 layers.append(activation)
-                layers.append(nn.Dropout(p=0.2)) 
+                layers.append(nn.Dropout(p=dropout_prob)) # <--- 설정값 사용하도록 변경
         
         self.mlp = nn.Sequential(*layers)
 
@@ -100,6 +99,7 @@ class FlowCF(GeneralRecommender):
         self.net = FlowModel(
             dims=self.dims_mlp,
             time_emb_size=self.time_emb_size,
+            dropout_prob=config['dropout'],
             time_type="cat",
             act_func=self.act_func,
             norm=False
