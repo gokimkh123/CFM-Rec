@@ -7,14 +7,14 @@ side_info_path: "./dataset/ML1M/mv-tag-emb.npy"
 
 entity_field: "mid"
 target_field: "uid"
-
+prior_type: 'noise'  # 'popularity' (인기 기반) 또는 'noise' (완전 무작위)
 dims_mlp: [300, 300]
-time_embedding_size: 10
+time_embedding_size: 16
 dropout: 0.0
 
 # Flow Matching 핵심 설정
-n_step: 2        # [추가] 학습 시 시간 이산화 단계 (Training Steps)
-inference_steps: 1  # 추론 시 ODE Solver 스텝 (Inference Steps)
+n_step: 100        # [추가] 학습 시 시간 이산화 단계 (Training Steps)
+inference_steps: 100  # 추론 시 ODE Solver 스텝 (Inference Steps)
 eval_step: 10
 # 학습 파라미터
 head_drop_ratio: 0.0

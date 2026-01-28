@@ -1,4 +1,3 @@
-# src/data_loader.py
 import pandas as pd
 import numpy as np
 import tensorflow as tf
@@ -15,6 +14,10 @@ class ColdStartDataLoader:
         self.head_drop_ratio = config.get('head_drop_ratio', 0.0)
         self.batch_size = config.get('batch_size', 2048)
 
+        # [수정 1] 필터링된 아이템 ID를 저장할 리스트 초기화
+        self.vali_item_ids = []
+        self.test_item_ids = []
+
     def _load_inter(self, file_name):
         path = os.path.join(self.data_path, file_name)
         # ID 타입 불일치 방지를 위해 모든 ID를 문자열(str)로 읽음
@@ -29,7 +32,6 @@ class ColdStartDataLoader:
         """특정 데이터프레임을 Interaction Matrix로 변환"""
         mat = np.zeros((self.num_entities, self.num_targets), dtype=np.float32)
         for _, row in df.iterrows():
-            # 전체 ID 맵에 존재하는 경우에만 마킹
             e_token = row[self.entity_field]
             t_token = row[self.target_field]
             if e_token in self.entity2id and t_token in self.target2id:
@@ -54,14 +56,23 @@ class ColdStartDataLoader:
         
         self.num_entities = len(self.entity_tokens)
         self.num_targets = len(self.target_tokens)
+
+        # [수정 2] Vali와 Test에 실제로 등장하는 아이템 ID만 추출 (Cold Item)
+        # evaluate.py의 valid_test_items 로직과 동일하게 만듭니다.
+        self.vali_item_ids = sorted(list(set(
+            [self.entity2id[t] for t in vali_df[self.entity_field].unique() if t in self.entity2id]
+        )))
+        self.test_item_ids = sorted(list(set(
+            [self.entity2id[t] for t in test_df[self.entity_field].unique() if t in self.entity2id]
+        )))
+
+        print(f">>> [Filter] Vali Items: {len(self.vali_item_ids)} / Test Items: {len(self.test_item_ids)}")
         
         # 3. 데이터셋별 매트릭스 분리 생성
         print(">>> 데이터 매트릭스 변환 중...")
         self.train_matrix = self._build_matrix(train_df)
         self.vali_matrix = self._build_matrix(vali_df)
-        
-        # 기존 코드 호환성을 위해 inter_matrix는 train으로 지정
-        self.inter_matrix = self.train_matrix 
+        self.test_matrix = self._build_matrix(test_df) # Test Matrix도 미리 생성
 
         # 4. Masking (Train Matrix에만 적용)
         if self.head_drop_ratio > 0:
@@ -79,7 +90,6 @@ class ColdStartDataLoader:
         
         for token, eid in self.entity2id.items():
             try:
-                # 토큰이 숫자인 경우 인덱스로 매핑 (ML1M 등)
                 raw_idx = int(token)
                 if raw_idx < len(raw_side_emb):
                     self.side_emb[eid] = raw_side_emb[raw_idx]
@@ -95,14 +105,21 @@ class ColdStartDataLoader:
 
     def get_dataset(self, mode='train'):
         """학습(train) 또는 검증(vali) 데이터셋 반환"""
+        
+        # [수정 3] 모드에 따라 평가할 아이템(Entity) 범위를 제한
         if mode == 'train':
             target_matrix = self.train_matrix
+            entity_ids = np.arange(self.num_entities) # Train은 전체 셔플
         elif mode == 'vali':
             target_matrix = self.vali_matrix
+            entity_ids = np.array(self.vali_item_ids) # Vali 파일에 있는 아이템만!
+        elif mode == 'test':
+            target_matrix = self.test_matrix
+            entity_ids = np.array(self.test_item_ids) # Test 파일에 있는 아이템만!
         else:
+            # 기본값 (혹시 모를 오류 방지)
             target_matrix = self.train_matrix
-
-        entity_ids = np.arange(self.num_entities)
+            entity_ids = np.arange(self.num_entities)
         
         def generator():
             for eid in entity_ids:
@@ -120,6 +137,7 @@ class ColdStartDataLoader:
         if mode == 'train':
             dataset = dataset.shuffle(self.num_entities).batch(self.batch_size)
         else:
+            # 평가 시에는 순서대로 (셔플 X)
             dataset = dataset.batch(self.batch_size)
             
         return dataset.prefetch(tf.data.AUTOTUNE)
