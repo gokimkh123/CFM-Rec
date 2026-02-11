@@ -8,35 +8,44 @@ class ColdStartDataLoader:
         """
         config: 전체 설정 딕셔너리 (YAML 로드 결과)
         """
-        self.dataset_name = config.get('dataset', 'CiteULike')
+        # 1. 사용할 데이터셋 이름 가져오기
+        self.dataset_name = config.get('dataset')
+        if not self.dataset_name:
+            raise ValueError("❌ [Error] config.yaml에 'dataset' 항목이 없습니다.")
+
+        # 2. 해당 데이터셋의 설정 블록 가져오기 (없으면 에러 발생!)
+        ds_config = config.get(self.dataset_name)
+        if not ds_config:
+            raise ValueError(f"❌ [Error] config.yaml에 '{self.dataset_name}' 설정 블록이 없습니다.")
         
-        # 해당 데이터셋의 설정 가져오기 (없으면 config 루트에서 검색)
-        ds_config = config.get(self.dataset_name, config)
-        
-        # 설정 적용
-        self.data_path = ds_config.get('data_path', './dataset/citeulike/')
-        self.train_file = ds_config.get('train_file', 'train.csv')
-        self.vali_file = ds_config.get('vali_file', 'vali.csv')
-        self.test_file = ds_config.get('test_file', 'test.csv')
-        self.side_info_path = ds_config.get('side_info_path', './dataset/citeulike/citeulike-tag-emb.npy')
-        
-        # 구분자 설정 (기본값: 쉼표)
-        self.separator = ds_config.get('separator', ',')
-        
-        self.entity_field = ds_config.get('entity_field', 'iid')
-        self.target_field = ds_config.get('target_field', 'uid')
+        # 3. 설정 적용 (기본값 제거 -> YAML에 경로 누락시 에러 발생 유도)
+        #    이렇게 해야 경로가 잘못되었을 때 바로 알 수 있습니다.
+        try:
+            self.data_path = ds_config['data_path']
+            self.train_file = ds_config.get('train_file', 'train.csv') # 파일명은 기본값 있어도 됨
+            self.vali_file = ds_config.get('vali_file', 'vali.csv')
+            self.test_file = ds_config.get('test_file', 'test.csv')
+            
+            # 여기가 핵심: Books는 config에서 side_info_path를 꼭 지정했으므로 가져와야 함
+            self.side_info_path = ds_config['side_info_path'] 
+            
+            self.separator = ds_config.get('separator', ',') # 구분자
+            self.entity_field = ds_config.get('entity_field', 'iid')
+            self.target_field = ds_config.get('target_field', 'uid')
+
+        except KeyError as e:
+            raise KeyError(f"❌ [Error] '{self.dataset_name}' 설정에 필수 항목 {e} 가 누락되었습니다.")
         
         self.head_drop_ratio = config.get('head_drop_ratio', 0.0)
         self.batch_size = config.get('batch_size', 1024)
 
         print(f">>> [DataLoader] Initialized for dataset: {self.dataset_name}")
         print(f"    - Path: {self.data_path}")
+        print(f"    - Side Info: {self.side_info_path}")
         print(f"    - Separator: '{self.separator}'")
 
         self.vali_item_ids = []
         self.test_item_ids = []
-
-        # __init__에서는 데이터를 로드하지 않음 (train.py가 build()를 호출할 때 로드)
 
     def _load_inter(self, file_name):
         path = os.path.join(self.data_path, file_name)
