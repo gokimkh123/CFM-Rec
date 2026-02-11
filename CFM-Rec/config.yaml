@@ -2,7 +2,7 @@
 
 # --- Dataset Selection (Choose one) ---
 # dataset: "ML1M"
-dataset: "ML1M"
+dataset: "Books"
 
 # --- ML1M Configuration (TSV, Tab-separated) ---
 ML1M:
@@ -25,6 +25,18 @@ CiteULike:
   separator: ","        # 쉼표 구분자
   entity_field: "iid"   # Item ID
   target_field: "uid"   # User ID
+
+# --- Books Configuration (Added) ---
+Books:
+  data_path: "./dataset/Books/"
+  train_file: "train.csv"
+  vali_file: "vali.csv"
+  test_file: "test.csv"
+  side_info_path: "./dataset/Books/content_embeddings_sbert.npy"
+  separator: ","          # CSV이므로 쉼표
+  entity_field: "iid"     # 아이템 컬럼명
+  target_field: "uid"     # 유저 컬럼명
+
 
 # --- Model Architecture ---
 prior_type: 'noise'  # 'popularity' or 'noise'

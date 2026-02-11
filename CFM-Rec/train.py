@@ -179,7 +179,7 @@ def train():
     optimizer = tf.keras.optimizers.Adam(learning_rate=config['learning_rate'])
     
     current_time = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_dir = f'logs/COMPARISON/FLOW_{args.prior_type}/step_{args.steps:03d}_{current_time}'
+    log_dir = f'logs_{config["dataset"]}/COMPARISON/FLOW_{args.prior_type}/step_{args.steps:03d}_{current_time}'
     summary_writer = tf.summary.create_file_writer(log_dir)
     
     epochs = config['epochs']
@@ -256,12 +256,16 @@ def train():
     test_metrics = evaluate_user_to_item(model, flow, test_ds, args.steps, k_list=[10, 20], fixed_step=best_val_step)
     
     final_r10, final_r20 = test_metrics['R@10'], test_metrics['R@20']
-    final_n20 = test_metrics['N@20']
+    final_n10, final_n20 = test_metrics['N@10'], test_metrics['N@20']
+    final_p10, final_p20 = test_metrics['P@10'], test_metrics['P@20']
     
     with summary_writer.as_default():
         tf.summary.scalar('Test/Recall@10', final_r10, step=epochs)
         tf.summary.scalar('Test/Recall@20', final_r20, step=epochs)
+        tf.summary.scalar('Test/NDCG@10', final_n10, step=epochs)
         tf.summary.scalar('Test/NDCG@20', final_n20, step=epochs)
+        tf.summary.scalar('Test/Precision@10', final_p10, step=epochs)
+        tf.summary.scalar('Test/Precision@20', final_p20, step=epochs)
         tf.summary.scalar('Test/Best_Step', best_val_step, step=epochs)
 
     console.print(Panel.fit(
