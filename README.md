@@ -68,7 +68,7 @@ Real-time monitoring of Loss curves and Recall@20 performance.
 
 Launch TensorBoard inside the container:
 ```Bash
-tensorboard --logdir logs/ --port 6006 --bind_all
+tensorboard --logdir logs_{dataset}/ --port 6006 --bind_all
 ```
 Access from your local machine:
 
