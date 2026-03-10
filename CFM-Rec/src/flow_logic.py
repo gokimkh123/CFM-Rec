@@ -19,7 +19,7 @@ class BernoulliFlow:
             
             # 마지막 스텝이면 모델 예측값으로 바로 점프
             if (1.0 - t_float) <= (dt + 1e-5):
-                return pred
+                return tf.cast(pred, tf.float32)  # FP16 안전: mixed precision 시에도 float32 보장
 
             denom = (1.0 - t_float + 1e-5)
             v_t = (pred - x_t) / denom
