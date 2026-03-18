@@ -224,7 +224,6 @@ def run_single():
         model.load_weights(save_path)
     except:
         pass
-
     # ── 전체 inference step 평가 ──
     # 1, 1+stride, 1+2*stride, ..., 마지막에 N 포함
     stride = args.stride
@@ -233,10 +232,16 @@ def run_single():
 
     results = {}
     for s in steps:
+        start_time = time.time()  # 💡 [추가] 추론 시작 시간 측정
         res = evaluate_fixed(model, flow, test_ds, N, s)
+        infer_time = time.time() - start_time  # 💡 [추가] 추론 소요 시간 계산
+        
+        res['infer_time'] = infer_time  # 💡 [추가] 평가 결과 딕셔너리에 시간 삽입!
         results[str(s)] = res
+        
         if s % 50 == 0 or s <= 5 or s == steps[-1]:
-            log(f"    Step={s:>3d} | R@20={res['R@20']:.4f}")
+            # 💡 [추가] 콘솔 출력에도 몇 초가 걸렸는지 표시하도록 수정
+            log(f"    Step={s:>3d} | R@20={res['R@20']:.4f} | Time={infer_time:.3f}s")
 
     # 저장
     with open(args._output_json, 'w') as f:
@@ -383,8 +388,8 @@ def main():
     fig, ax = plt.subplots(figsize=(12, 6))
 
     colors = {
-        'ML1M': '#2196F3',
-        'CiteULike': '#F44336',
+        'ML1M': '#FF9800',
+        'CiteULike': '#4CAF50',
         'Books': '#4CAF50',
     }
     default_colors = ['#FF9800', '#9C27B0', '#795548']
@@ -398,18 +403,19 @@ def main():
 
         ax.plot(steps, r20_vals, 'o-', color=color, markersize=4,
                 linewidth=2, label=dataset)
+        '''
         # 표준편차 영역 (반투명)
         if any(s > 0 for s in r20_stds):
             r20_arr = np.array(r20_vals)
             std_arr = np.array(r20_stds)
             ax.fill_between(steps, r20_arr - std_arr, r20_arr + std_arr,
                             color=color, alpha=0.15)
-
-    ax.set_xlabel('Inference Step', fontsize=13)
-    ax.set_ylabel('Recall@20', fontsize=13)
-    ax.set_title('Flow Matching: Inference Step vs Recall@20 (N=300 fixed)',
-                 fontsize=14, fontweight='bold')
-    ax.legend(fontsize=12, loc='lower right')
+        '''
+    ax.set_xlabel('Inference Step', fontsize=20)
+    ax.set_ylabel('Recall@20', fontsize=20)
+    ax.set_title('CFM: Inference Step vs Recall@20 (N=300 fixed)',
+                 fontsize=20, fontweight='bold')
+    ax.legend(fontsize=15, loc='lower right')
     ax.grid(True, alpha=0.3)
     ax.set_xlim(0, args.train_N + 5)
 
